@@ -9,6 +9,7 @@
  * 
  * 需要量子变量：
  * 
+ * QUANTUM_AUTH_CODE  量子授权码，月卡每天可用转链服务3次，年可用10次，永久50次。
  * 
  * WB_USE_SCORE 挖宝需要多少积分 （整数）
  * 
@@ -27,8 +28,8 @@
  **/
 const got = require('got');
 var HttpsProxyAgent = require("https-proxy-agent");
-
-var CryptoJS = require('crypto-js');
+const http = require("http");
+const https = require("https");
 const {
     sendNotify, getUserInfo, updateUserInfo, addOrUpdateCustomDataTitle, addCustomData, getCustomData, sleep, getEnvs, updateCustomData, deleteEnvByIds
 } = require('./quantum');
@@ -46,6 +47,7 @@ let customerDataType = "wabao_order";
 let CommunicationUserId = process.env.CommunicationUserId;
 let CommunicationUserName = process.env.CommunicationUserName;
 let ManagerQQ = process.env.ManagerQQ;
+let QUANTUM_AUTH_CODE = process.env.QUANTUM_AUTH_CODE;
 let XM_PROXY = process.env.XM_PROXY;
 
 //最大助力次数
@@ -54,12 +56,6 @@ let count = 0;
 
 var xmProxy = null;
 var error = false;
-var appId = "63d78";
-var genKey = null;
-var token;
-var fp;
-
-
 !(async () => {
     var inviterId = wabao_url.match(/inviterId=([^&]+)(?=&?)/)[1]
     var inviterCode = wabao_url.match(/inviterCode=([^&]+)(?=&?)/)[1]
@@ -76,7 +72,6 @@ var fp;
     var startTime = moment().format("YYYY-MM-DD")
     var endTime = moment().format("YYYY-MM-DD HH:mm:ss");
     var ss = await getCustomData(customerDataType, startTime, endTime, { Data3: CommunicationUserId });
-
     if (ss && ss.length > 0 && ss.filter((t) => t.Data6.indexOf(inviterId) > -1).length > 0) {
         var msg = "重复的挖宝任务，已自动跳过。";
         console.log(msg);
@@ -104,7 +99,7 @@ var fp;
         Title3: "QQ/WX",
         Title4: "昵称",
         Title5: "任务编号",
-        Title6: "原链接",
+        Title6: "助力链接",
         Title7: "助力次数"
     })
     var wbOrder = {
@@ -121,13 +116,18 @@ var fp;
 
     var cookies = await getEnvs("JD_COOKIE", null, 2);
     if (cookies.length == 0) {
-        var message = "未提供JD_COOKIE 无法执行任务！"
+        var message = "无JD_COOKIE环境变量，无法执行任务！"
         console.log(message);
         await sendNotify(message)
         return;
     }
-    await requestAlgo();
-    wbOrder.Data1 = `https://api.m.jd.com/?functionId=happyDigHelp&appid=activities_platform&client=H5&clientVersion=1.0.0&body={"linkId":"${ActivityId}","inviter":"${inviterId}","inviteCode":"${inviterCode}"}&t=1649865711362&h5st=` + geth5st();
+    var convertResult = await convertUrl(url);
+    if (convertResult) {
+        wbOrder.Data1 = convertResult;
+    } else {
+        await sendNotify("挖宝转链失败了，请删除订单后重新提交");
+        return;
+    }
     var sss = await addCustomData([wbOrder])
     wbOrder = sss[0];
     cookies = cookies.filter((t) => t.Enable).sort(function () {
@@ -135,9 +135,10 @@ var fp;
     });
     console.log("cookie数量：" + cookies.length);
     var result = "";
-    await sendNotify("开始挖宝任务：" + wbOrder.Data5 + m)
+    await sendNotify("开始挖宝任务，编号：" + wbOrder.Data5 + m)
     var threadCount = 0;
     var threadCompleteCount = 0;
+    maxCount = 40;
     if (wabao_url.split(" ").length == 2) {
         try {
             maxCount = parseInt(wabao_url.split(" ")[1])
@@ -146,7 +147,7 @@ var fp;
         }
     }
     await getProxy();
-    for (var index = 0; index < cookies.length; index++) {
+    for (var index = 0; index < cookies.length && count < maxCount; index++) {
         try {
             var cookie = cookies[index];
             if (!cookie || !cookie.Value) {
@@ -190,7 +191,13 @@ var fp;
                 }
                 threadCompleteCount++;
             }).catch(async error => {
-                console.log(JSON.stringify(error.response));
+                try {
+                    console.log(JSON.stringify(error.response));
+                } catch {
+                    try {
+                        console.log(error)
+                    } catch { }
+                }
                 threadCompleteCount++;
                 if (!XM_PROXY) {
                     error = true;
@@ -200,8 +207,9 @@ var fp;
             });
             threadCount++;
             while ((threadCount >= maxCount - count && threadCount > threadCompleteCount)) {
-                await sleep(100);
+                await sleep(200);
             }
+            //如果COOKE 已经执行完毕，则等待5秒，等所有请求完毕后结束遍历
             if (index == cookies.length - 1) {
                 await sleep(5000);
             }
@@ -225,6 +233,10 @@ var fp;
     if (count < maxCount) {
         wbOrder.Data2 = "未完成";
     }
+    if (count >= maxCount) {
+        wbOrder.Data2 = "完成";
+        wbOrder.Data7 = count;
+    }
     result = "任务编号：" + wbOrder.Data5 + "执行结束，挖宝结果：" + wbOrder.Data2 + "，助力次数：" + count;
     console.log(result);
     await updateCustomData(wbOrder);
@@ -234,123 +246,46 @@ var fp;
     }
 })();
 
-
-
-async function requestAlgo() {
-    var s = "", a = "0123456789", u = a, c = (Math.random() * 10) | 0;
-    do {
-        ss = getRandomIDPro({ size: 1, customDict: a }) + ""
-        if (s.indexOf(ss) == -1) s += ss
-    } while (s.length < 3)
-    for (let i of s.slice()) u = u.replace(i, '')
-    fp = getRandomIDPro({ size: c, customDict: u }) + "" + s + getRandomIDPro({ size: (14 - (c + 3)) + 1, customDict: u }) + c + ""
-    let opts = {
-        url: `https://cactus.jd.com/request_algo?g_ty=ajax`,
-        headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            'Origin': 'https://prodev.m.jd.com',
-            'Referer': 'https://prodev.m.jd.com/'
-        },
-        method: "post",
-        body: `{"version":"3.0","fp":"${fp}","appId":"${appId}","timestamp":${Date.now()},"platform":"web","expandParams":""}`
-    }
-    // console.log(JSON.stringify(opts))
-    var response = await api(opts);
-    data = response.body;
-    const { data: { result } = {} } = JSON.parse(data);
-    token = result.tk
-    console.log(result.algo)
-    genKey = new Function(`return ${result.algo}`)();
-}
-
-function getRandomIDPro() {
-    var e,
-        t,
-        a = void 0 === (n = (t = 0 < arguments.length && void 0 !== arguments[0] ? arguments[0] : {}).size) ? 10 : n,
-        n = void 0 === (n = t.dictType) ? 'number' : n,
-        i = '';
-    if ((t = t.customDict) && 'string' == typeof t) e = t;
-    else
-        switch (n) {
-            case 'alphabet':
-                e = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
-                break;
-            case 'max':
-                e = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-';
-                break;
-            case 'number':
-            default:
-                e = '0123456789';
-        }
-
-    for (; a--;) i += e[(Math.random() * e.length) | 0];
-    return i;
-}
-
-
-function geth5st() {
-    let t = [{ "key": "City", "value": "City" }]
-    // let h5st = geth5st(t)
-
-    let a = t.map(function (e) {
-        return e["key"] + ":" + e["value"]
-    })
-    let time = Date.now()
-    let timestamp = format("yyyyMMddhhmmssSSS", time);
-    hash1 = genKey(token, fp.toString(), timestamp.toString(), appId.toString(), CryptoJS).toString();
-    const hash2 = CryptoJS.HmacSHA256(a, hash1.toString()).toString();
-    let h5st = ["".concat(timestamp.toString()), "".concat(fp.toString()), "".concat(appId.toString()), "".concat(token), "".concat(hash2), "3.0", "".concat(time)].join(";")
-    console.log(h5st);
-    return h5st
-}
-function format(a, time) {
-    if (!a) a = 'yyyy-MM-dd';
-    var t;
-    if (!time) {
-        t = Date.now();
-    } else {
-        t = new Date(time);
-    }
-    var e,
-        n = new Date(t),
-        d = a,
-        l = {
-            'M+': n.getMonth() + 1,
-            'd+': n.getDate(),
-            'D+': n.getDate(),
-            'h+': n.getHours(),
-            'H+': n.getHours(),
-            'm+': n.getMinutes(),
-            's+': n.getSeconds(),
-            'w+': n.getDay(),
-            'q+': Math.floor((n.getMonth() + 3) / 3),
-            'S+': n.getMilliseconds(),
+async function convertUrl(url) {
+    var result = null;
+    try {
+        var options = {
+            'method': 'POST',
+            'url': 'http://47.107.105.249:8012/api/open/ConvertWabaoUrl',
+            'headers': {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                "Url": url
+            })
         };
-    /(y+)/i.test(d) && (d = d.replace(RegExp.$1, ''.concat(n.getFullYear()).substr(4 - RegExp.$1.length)));
-    Object.keys(l).forEach(e => {
-        if (new RegExp('('.concat(e, ')')).test(d)) {
-            var t,
-                a = 'S+' === e ? '000' : '00';
-            d = d.replace(RegExp.$1, 1 == RegExp.$1.length ? l[e] : ''.concat(a).concat(l[e]).substr(''.concat(l[e]).length));
-        }
-    });
-    return d;
+        var response = await api(options);
+        console.log("挖宝转链返回结果信息：" + response.body);
+        result = response.body;
+    } catch (e) {
+        console.log("转链失败：");
+    }
+    return result;
 }
 
+var xmProxyCount = 0;
 /**
  * 
  * 获取熊猫代理
  * 
  * */
 async function getProxy() {
+    if (xmProxyCount > 10) {
+        console.log("获取熊猫代理次数超过10次,停止获取。");
+        return;
+    }
+    xmProxyCount++;
     if (XM_PROXY == null) {
         console.log("未配置熊猫代理API地址，可能出现403");
         return null;
     }
-    console.log("获取熊猫代理：");
+    console.log("开始获取熊猫代理");
+    var result = null;
     try {
         var options = {
             'method': 'get',
@@ -363,14 +298,16 @@ async function getProxy() {
         console.log("获取代理IP结果：" + response.body);
         result = JSON.parse(response.body);
     } catch (e) {
-        console.log("熊猫代理获取异常。");
-        console.log(JSON.stringify(e));
+        console.log("熊猫代理获取异常，尝试重新获取。");
+        await sleep(1200);
+        await getProxy();
     }
-    if (result.code == "0" && result.obj) {
+    if (result && result.code == "0" && result.obj) {
         xmProxy = result.obj[0];
+        console.log(xmProxy);
     } else if (result.code == "-102") {
         console.log(result.msg)
-        await sleep(1000);
+        await sleep(1200);
         await getProxy();
     }
 }
